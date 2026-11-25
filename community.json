@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "name": "mf_voicegen",
+  "min_version": "1.0.0",
+  "needs_lila": false,
+  "licence": "GPLv3",
+  "description": "Speech synthesis on MayaFlux's tensor kernels: PyTorch checkpoints read without Python, the kernels vocoders need, and the Vocos vocoder.",
+  "assets": [
+    {
+      "id": "vocos_mel_24khz",
+      "description": "Vocos vocoder for 100 band mel spectrograms at 24 kHz, used by VocosModel.",
+      "source": {
+        "kind": "url"
+      },
+      "files": [
+        {
+          "url": "https://huggingface.co/charactr/vocos-mel-24khz/resolve/0feb3fdd929bcd6649e0e7c5a688cf7dd012ef21/pytorch_model.bin",
+          "to": "tensors/vocos_mel_24khz/pytorch_model.bin",
+          "sha256": "97ec976ad1fd67a33ab2682d29c0ac7df85234fae875aefcc5fb215681a91b2a",
+          "size_bytes": 54365991
+        },
+        {
+          "url": "https://huggingface.co/charactr/vocos-mel-24khz/resolve/0feb3fdd929bcd6649e0e7c5a688cf7dd012ef21/config.yaml",
+          "to": "tensors/vocos_mel_24khz/config.yaml",
+          "sha256": "da9033922f969a47f0c160010226919e59f27761fd5066f3828d46de6650b0fc",
+          "size_bytes": 461
+        },
+        {
+          "url": "https://huggingface.co/charactr/vocos-mel-24khz/resolve/0feb3fdd929bcd6649e0e7c5a688cf7dd012ef21/README.md",
+          "to": "tensors/vocos_mel_24khz/MODEL_CARD.md",
+          "sha256": "5858497d76d58914b29958a0f448e7b4fd3bb54940100baaa7520d4a56d8b3df",
+          "size_bytes": 1830
+        }
+      ],
+      "license": {
+        "spdx": "MIT",
+        "notice": "tensors/vocos_mel_24khz/MODEL_CARD.md"
+      }
+    }
+  ]
+}

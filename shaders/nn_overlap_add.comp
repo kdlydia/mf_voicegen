@@ -1,0 +1,63 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(buffer_reference, std430) readonly buffer FloatRef {
+    float v[];
+};
+
+layout(buffer_reference, std430) buffer ResultRef {
+    float v[];
+};
+
+layout(push_constant) uniform PC {
+    FloatRef frames;
+    FloatRef window_sq;
+    ResultRef dst;
+    uint frame_length;
+    uint count;
+    uint hop;
+    uint trim;
+    uint samples;
+    uint normalise;
+} pc;
+
+uint invocation_index()
+{
+    return gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+}
+
+/**
+ * @brief Overlap-add of count frames, frame f starting at f * hop, into samples values.
+ *
+ * frames is [frame_length, count]: one row per position in a frame, one column
+ * per frame, as a pointwise convolution leaves it. Output sample t is position
+ * t + trim of the summed signal. With normalise set, each sample is divided by
+ * the summed squared window at its position, as an inverse STFT does, and is
+ * zero where that sum is below 1e-11.
+ */
+void main()
+{
+    const uint t = invocation_index();
+    if (t >= pc.samples)
+        return;
+
+    const uint p = t + pc.trim;
+    const uint hop = max(pc.hop, 1u);
+    const uint last = min(p / hop, pc.count - 1u);
+    const uint first = p + 1u > pc.frame_length ? (p + 1u - pc.frame_length + hop - 1u) / hop : 0u;
+
+    float sum = 0.0;
+    float envelope = 0.0;
+    for (uint f = first; f <= last && f < pc.count; ++f) {
+        const uint r = p - f * hop;
+        sum += pc.frames.v[r * pc.count + f];
+        if (pc.normalise != 0u)
+            envelope += pc.window_sq.v[r];
+    }
+
+    if (pc.normalise != 0u)
+        sum = envelope > 1.0e-11 ? sum / envelope : 0.0;
+    pc.dst.v[t] = sum;
+}

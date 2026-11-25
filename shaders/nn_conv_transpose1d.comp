@@ -1,0 +1,108 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(buffer_reference, std430) readonly buffer FloatRef {
+    float v[];
+};
+
+layout(buffer_reference, std430) buffer ResultRef {
+    float v[];
+};
+
+layout(push_constant) uniform PC {
+    FloatRef src;
+    FloatRef weights;
+    FloatRef bias;
+    ResultRef dst;
+    uint batch;
+    uint c_in;
+    uint t_in;
+    uint c_out;
+    uint t_out;
+    uint kernel_size;
+    uint stride;
+    uint pad;
+    uint flags;
+    uint dilation;
+} pc;
+
+const uint FLAG_BIAS = 1u;
+const uint FLAG_RELU_INPUT = 2u;
+const uint ACT_SHIFT = 2u;
+const uint ACT_RELU = 1u;
+const uint ACT_SIGMOID = 2u;
+const uint ACT_GELU = 3u;
+
+const float INV_SQRT2 = 0.70710678118654752;
+
+float gelu(float x)
+{
+    const float z = abs(x) * INV_SQRT2;
+    const float t = 1.0 / (1.0 + 0.3275911 * z);
+    const float poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+    const float tail = 0.5 * poly * exp(-z * z);
+    return x * (x >= 0.0 ? 1.0 - tail : tail);
+}
+
+uint invocation_index()
+{
+    return gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+}
+
+/**
+ * @brief Transposed one dimensional convolution over [batch, c_in, t_in] into [batch, c_out, t_out].
+ *
+ * weights are [c_in, c_out, kernel_size], as PyTorch stores them. Input step ti
+ * tap k lands on output position ti * stride + k * dilation - pad; outputs past
+ * t_out are dropped, so t_out also expresses an output padding. Each invocation
+ * gathers the inputs that land on its own output, so no two write the same
+ * element. flags as nn_conv1d: bit 0 adds bias, bit 1 applies ReLU to the
+ * input, bits 2 and 3 pick the output activation (0 none, 1 ReLU, 2 sigmoid,
+ * 3 GELU).
+ */
+void main()
+{
+    const uint idx = invocation_index();
+    if (idx >= pc.batch * pc.c_out * pc.t_out)
+        return;
+
+    const uint to = idx % pc.t_out;
+    const uint co = (idx / pc.t_out) % pc.c_out;
+    const uint n = idx / (pc.t_out * pc.c_out);
+
+    float acc = 0.0;
+    if ((pc.flags & FLAG_BIAS) != 0u)
+        acc = pc.bias.v[co];
+
+    const bool relu_input = (pc.flags & FLAG_RELU_INPUT) != 0u;
+    const uint stride = max(pc.stride, 1u);
+    const uint dilation = max(pc.dilation, 1u);
+    const int base = int(to) + int(pc.pad);
+
+    for (uint k = 0u; k < pc.kernel_size; ++k) {
+        const int reach = base - int(k * dilation);
+        if (reach < 0 || uint(reach) % stride != 0u)
+            continue;
+        const uint ti = uint(reach) / stride;
+        if (ti >= pc.t_in)
+            continue;
+        for (uint ci = 0u; ci < pc.c_in; ++ci) {
+            float x = pc.src.v[(n * pc.c_in + ci) * pc.t_in + ti];
+            if (relu_input)
+                x = max(x, 0.0);
+            acc += pc.weights.v[(ci * pc.c_out + co) * pc.kernel_size + k] * x;
+        }
+    }
+
+    const uint activation = (pc.flags >> ACT_SHIFT) & 3u;
+    if (activation == ACT_RELU)
+        acc = max(acc, 0.0);
+    else if (activation == ACT_SIGMOID)
+        acc = 1.0 / (1.0 + exp(-acc));
+    else if (activation == ACT_GELU)
+        acc = gelu(acc);
+
+    pc.dst.v[idx] = acc;
+}
