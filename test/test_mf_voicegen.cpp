@@ -10,6 +10,8 @@
 
 #include <fstream>
 
+#include <gtest/gtest.h>
+
 // Runs with no device. The fixtures come from generate_reference.py: small
 // torch.save files for the reader and PyTorch outputs for the CPU kernels. The
 // Vocos checkpoint is checked when fetch_assets.py has put it in test/data.
@@ -19,18 +21,6 @@ namespace {
 using namespace MayaFlux;
 namespace fs = std::filesystem;
 namespace TK = Yantra::TensorKernels;
-
-int g_failures = 0;
-int g_checks = 0;
-
-void check(bool ok, std::string_view what)
-{
-    ++g_checks;
-    if (!ok) {
-        ++g_failures;
-    }
-    MF_PRINT("{}  {}", ok ? "PASS" : "FAIL", what);
-}
 
 const fs::path k_root = MF_VOICEGEN_TEST_DIR;
 const fs::path k_vocos = k_root / "data/tensors/vocos_mel_24khz/pytorch_model.bin";
@@ -84,91 +74,77 @@ std::vector<float> floats(const Kakshya::TensorSet& set, std::string_view name)
     return tensor ? tensor->to_vector<float>().value_or(std::vector<float> {}) : std::vector<float> {};
 }
 
-void test_state_dict()
+TEST(TorchCheckpointReader, StateDict)
 {
     IO::TorchCheckpointReader reader;
-    check(reader.open(fixture("state_dict.pt")), "state_dict.pt opens");
+    EXPECT_TRUE(reader.open(fixture("state_dict.pt"))) << "state_dict.pt opens";
 
     std::vector<std::string> names;
     for (const auto& spec : reader.describe()) {
         names.push_back(spec.name);
     }
-    check(names == std::vector<std::string> { "a", "t", "row", "half", "brain", "long", "mask", "scalar", "empty" },
-        "describe lists the state_dict's tensors in its order");
+    EXPECT_TRUE((names == std::vector<std::string> { "a", "t", "row", "half", "brain", "long", "mask", "scalar", "empty" })) << "describe lists the state_dict's tensors in its order";
 
     const auto a = reader.read("a");
-    check(a && a->spec().shape == std::vector<uint64_t> { 2, 3 }
-            && raw_values<float>(a) == std::vector<float> { 0, 1, 2, 3, 4, 5 },
-        "a float32 tensor reads with its shape and values");
+    EXPECT_TRUE((a && a->spec().shape == std::vector<uint64_t> { 2, 3 }
+            && raw_values<float>(a) == std::vector<float> { 0, 1, 2, 3, 4, 5 })) << "a float32 tensor reads with its shape and values";
 
     const auto t = reader.read("t");
-    check(t && t->spec().shape == std::vector<uint64_t> { 3, 2 } && t->spec().is_contiguous()
-            && raw_values<float>(t) == std::vector<float> { 0, 3, 1, 4, 2, 5 },
-        "a transposed view of the same storage is gathered into C order");
+    EXPECT_TRUE((t && t->spec().shape == std::vector<uint64_t> { 3, 2 } && t->spec().is_contiguous()
+            && raw_values<float>(t) == std::vector<float> { 0, 3, 1, 4, 2, 5 })) << "a transposed view of the same storage is gathered into C order";
 
     const auto row = reader.read("row");
-    check(row && row->spec().shape == std::vector<uint64_t> { 3 } && raw_values<float>(row) == std::vector<float> { 3, 4, 5 },
-        "a view at a storage offset reads from that offset");
+    EXPECT_TRUE((row && row->spec().shape == std::vector<uint64_t> { 3 } && raw_values<float>(row) == std::vector<float> { 3, 4, 5 })) << "a view at a storage offset reads from that offset";
 
     const auto half = reader.read("half");
-    check(half && half->spec().dtype == Kakshya::TensorDType::float16()
-            && as_floats(half) == std::vector<float> { 0.5F, -1.0F, 2.0F },
-        "float16 keeps its element type and converts to float");
+    EXPECT_TRUE((half && half->spec().dtype == Kakshya::TensorDType::float16()
+            && as_floats(half) == std::vector<float> { 0.5F, -1.0F, 2.0F })) << "float16 keeps its element type and converts to float";
 
     const auto brain = reader.read("brain");
-    check(brain && brain->spec().dtype == Kakshya::TensorDType::bfloat16()
-            && as_floats(brain) == std::vector<float> { 1.0F, -2.0F, 0.25F, 3.0F },
-        "bfloat16 keeps its element type and converts to float");
+    EXPECT_TRUE((brain && brain->spec().dtype == Kakshya::TensorDType::bfloat16()
+            && as_floats(brain) == std::vector<float> { 1.0F, -2.0F, 0.25F, 3.0F })) << "bfloat16 keeps its element type and converts to float";
 
     const auto wide = reader.read("long");
-    check(wide && wide->spec().dtype == Kakshya::TensorDType::of<int64_t>()
-            && raw_values<int64_t>(wide) == std::vector<int64_t> { 1, -2, 3, int64_t { 1 } << 40 },
-        "int64 reads exactly, beyond 32 bits");
+    EXPECT_TRUE((wide && wide->spec().dtype == Kakshya::TensorDType::of<int64_t>()
+            && raw_values<int64_t>(wide) == std::vector<int64_t> { 1, -2, 3, int64_t { 1 } << 40 })) << "int64 reads exactly, beyond 32 bits";
 
     const auto mask = reader.read("mask");
-    check(mask && mask->spec().dtype == Kakshya::TensorDType::of<bool>()
-            && raw_values<uint8_t>(mask) == std::vector<uint8_t> { 1, 0, 1 },
-        "bool reads one byte per element");
+    EXPECT_TRUE((mask && mask->spec().dtype == Kakshya::TensorDType::of<bool>()
+            && raw_values<uint8_t>(mask) == std::vector<uint8_t> { 1, 0, 1 })) << "bool reads one byte per element";
 
     const auto scalar = reader.read("scalar");
-    check(scalar && scalar->spec().rank() == 0 && raw_values<double>(scalar) == std::vector<double> { 2.5 },
-        "a zero dimensional float64 reads as one value");
+    EXPECT_TRUE(scalar && scalar->spec().rank() == 0 && raw_values<double>(scalar) == std::vector<double> { 2.5 }) << "a zero dimensional float64 reads as one value";
 
     const auto empty = reader.read("empty");
-    check(empty && empty->spec().shape == std::vector<uint64_t> { 0, 4 } && empty->byte_size() == 0,
-        "an empty tensor reads with its shape and no bytes");
+    EXPECT_TRUE((empty && empty->spec().shape == std::vector<uint64_t> { 0, 4 } && empty->byte_size() == 0)) << "an empty tensor reads with its shape and no bytes";
 
-    check(!reader.read("missing") && reader.get_last_error().contains("missing"), "an unknown name fails with the name");
+    EXPECT_TRUE(!reader.read("missing") && reader.get_last_error().contains("missing")) << "an unknown name fails with the name";
 }
 
-void test_nested()
+TEST(TorchCheckpointReader, NestedCheckpoint)
 {
     IO::TorchCheckpointReader reader;
-    check(reader.open(fixture("nested.pt")), "nested.pt opens");
+    EXPECT_TRUE(reader.open(fixture("nested.pt"))) << "nested.pt opens";
 
     std::vector<std::string> names;
     for (const auto& spec : reader.describe()) {
         names.push_back(spec.name);
     }
-    check(names == std::vector<std::string> { "model.layer.weight", "list.0", "list.1", "params.w" },
-        "nested dictionaries and lists name tensors by their path");
-    check(raw_values<float>(reader.read("params.w")) == std::vector<float> { 4.0F, 5.0F },
-        "an nn.Parameter reads as its tensor");
+    EXPECT_TRUE((names == std::vector<std::string> { "model.layer.weight", "list.0", "list.1", "params.w" })) << "nested dictionaries and lists name tensors by their path";
+    EXPECT_TRUE((raw_values<float>(reader.read("params.w")) == std::vector<float> { 4.0F, 5.0F })) << "an nn.Parameter reads as its tensor";
 
     const auto metadata = reader.tensor_metadata();
-    check(metadata.contains("epoch") && metadata.at("epoch") == "7" && metadata.at("name") == "x" && metadata.at("lr") == "0.5",
-        "number and string leaves become metadata");
+    EXPECT_TRUE(metadata.contains("epoch") && metadata.at("epoch") == "7" && metadata.at("name") == "x" && metadata.at("lr") == "0.5") << "number and string leaves become metadata";
 
     const auto set = reader.read_tensors();
-    check(set && set->tensors.size() == 4 && set->is_consistent(), "read_tensors gives a consistent set");
+    EXPECT_TRUE(set && set->tensors.size() == 4 && set->is_consistent()) << "read_tensors gives a consistent set";
 }
 
-void test_refusals()
+TEST(TorchCheckpointReader, Refusals)
 {
     IO::TorchCheckpointReader reader;
-    check(!reader.open(fixture("legacy.pt")) && reader.get_last_error().contains("1.6"),
-        "the format before PyTorch 1.6 is refused with the reason");
-    check(!reader.open(fixture("kernels.safetensors")), "a safetensors file is not taken for a checkpoint");
+    EXPECT_TRUE(!reader.open(fixture("legacy.pt")) && reader.get_last_error().contains("1.6")) << "the format before PyTorch 1.6 is refused with the reason";
+    EXPECT_TRUE(!reader.open(fixture("kernels.safetensors"))) << "a safetensors file is not taken for a checkpoint";
 
     const fs::path truncated = fs::temp_directory_path() / "mf_voicegen_truncated.pt";
     {
@@ -177,94 +153,89 @@ void test_refusals()
         in.read(head.data(), static_cast<std::streamsize>(head.size()));
         std::ofstream(truncated, std::ios::binary).write(head.data(), in.gcount());
     }
-    check(!reader.open(truncated.string()) && !reader.get_last_error().empty(), "a truncated checkpoint is refused, not read");
+    EXPECT_TRUE(!reader.open(truncated.string()) && !reader.get_last_error().empty()) << "a truncated checkpoint is refused, not read";
     fs::remove(truncated);
 
     const auto head = IO::Detail::read_file_head(fixture("state_dict.pt"), 4096);
-    check(head && IO::TorchCheckpointReader::probe(head->bytes, head->file_size), "probe recognises a checkpoint");
+    EXPECT_TRUE(head && IO::TorchCheckpointReader::probe(head->bytes, head->file_size)) << "probe recognises a checkpoint";
     const auto other = IO::Detail::read_file_head(fixture("kernels.safetensors"), 4096);
-    check(other && !IO::TorchCheckpointReader::probe(other->bytes, other->file_size), "probe passes over a safetensors file");
+    EXPECT_TRUE(other && !IO::TorchCheckpointReader::probe(other->bytes, other->file_size)) << "probe passes over a safetensors file";
 }
 
-void test_registry()
+TEST(TorchCheckpointReader, Registry)
 {
     IO::SafetensorsReader::register_with_registry();
     IO::TorchCheckpointReader::register_with_registry();
     auto& registry = IO::TensorFormatRegistry::instance();
 
     const auto* format = registry.detect(fixture("state_dict.pt"));
-    check(format && format->name == "torch", "the registry picks the torch format for a .pt file");
+    EXPECT_TRUE(format && format->name == "torch") << "the registry picks the torch format for a .pt file";
     const auto* safetensors = registry.detect(fixture("kernels.safetensors"));
-    check(safetensors && safetensors->name == "safetensors", "the registry still picks safetensors for its files");
-    check(!registry.create_writer("out.pt"), "the torch format is read only");
+    EXPECT_TRUE(safetensors && safetensors->name == "safetensors") << "the registry still picks safetensors for its files";
+    EXPECT_TRUE(!registry.create_writer("out.pt")) << "the torch format is read only";
 }
 
-void test_vocos_checkpoint()
+TEST(VocosModel, Checkpoint)
 {
     if (!fs::exists(k_vocos)) {
-        MF_PRINT("SKIP  Vocos checkpoint not fetched ({})", k_vocos.string());
-        return;
+        GTEST_SKIP() << "Vocos checkpoint not fetched: " << k_vocos.string();
     }
     const auto* format = IO::TensorFormatRegistry::instance().detect(k_vocos.string());
-    check(format && format->name == "torch", "pytorch_model.bin is recognised by its content, not its extension");
+    EXPECT_TRUE(format && format->name == "torch") << "pytorch_model.bin is recognised by its content, not its extension";
 
     auto reader = IO::TensorFormatRegistry::instance().create_reader(k_vocos.string());
-    check(reader && reader->open(k_vocos.string()), "the Vocos checkpoint opens");
+    EXPECT_TRUE(reader && reader->open(k_vocos.string())) << "the Vocos checkpoint opens";
     if (!reader || !reader->is_open()) {
         return;
     }
-    check(reader->describe().size() == 83, "the Vocos checkpoint lists 83 tensors");
+    EXPECT_TRUE(reader->describe().size() == 83) << "the Vocos checkpoint lists 83 tensors";
 
     auto weights = reader->read_tensors();
-    check(weights && Yantra::VocosModel::diagnose(*weights).empty(), "VocosModel accepts the checkpoint's tensors");
+    EXPECT_TRUE(weights && Yantra::VocosModel::diagnose(*weights).empty()) << "VocosModel accepts the checkpoint's tensors";
     if (!weights) {
         return;
     }
     const auto fb = floats(*weights, "feature_extractor.mel_spec.mel_scale.fb");
-    check(fb.size() == 513 * 100 && std::ranges::all_of(fb, [](float v) { return v >= 0.0F; }),
-        "the mel filter bank reads as 513 by 100 non-negative weights");
+    EXPECT_TRUE(fb.size() == 513 * 100 && std::ranges::all_of(fb, [](float v) { return v >= 0.0F; })) << "the mel filter bank reads as 513 by 100 non-negative weights";
 
     auto damaged = *weights;
     std::erase_if(damaged.tensors, [](const Kakshya::TensorData& t) { return t.spec().name == "backbone.convnext.3.gamma"; });
-    check(Yantra::VocosModel::diagnose(damaged).contains("backbone.convnext.3.gamma"), "diagnose names a missing tensor");
+    EXPECT_TRUE(Yantra::VocosModel::diagnose(damaged).contains("backbone.convnext.3.gamma")) << "diagnose names a missing tensor";
 }
 
-void test_cpu_kernels()
+TEST(VoiceKernels, CpuMatchesPyTorch)
 {
     IO::SafetensorsReader reader;
     const bool opened = reader.open(fixture("kernels.safetensors"));
-    check(opened, "kernels.safetensors opens");
+    EXPECT_TRUE(opened) << "kernels.safetensors opens";
     if (!opened) {
         return;
     }
     const auto set = reader.read_tensors();
     if (!set) {
-        check(false, "kernels.safetensors reads");
+        ADD_FAILURE() << "kernels.safetensors reads";
         return;
     }
 
     const auto x = floats(*set, "unary.x");
     const auto positive = floats(*set, "unary.positive");
     constexpr double tolerance = 2.0e-6;
-    check(worst(TK::cpu::unary(TK::UnaryOp::Exp, x, 20.0F), floats(*set, "unary.exp")) < tolerance, "cpu Exp with a cap matches clamp(exp(x))");
-    check(worst(TK::cpu::unary(TK::UnaryOp::Log, positive, 1.0e-7F), floats(*set, "unary.log")) < tolerance, "cpu Log with a floor matches log(clamp(x))");
-    check(worst(TK::cpu::unary(TK::UnaryOp::Sin, x), floats(*set, "unary.sin")) < tolerance, "cpu Sin matches");
-    check(worst(TK::cpu::unary(TK::UnaryOp::Cos, x), floats(*set, "unary.cos")) < tolerance, "cpu Cos matches");
-    check(worst(TK::cpu::unary(TK::UnaryOp::Tanh, x), floats(*set, "unary.tanh")) < tolerance, "cpu Tanh matches");
-    check(worst(TK::cpu::unary(TK::UnaryOp::LeakyRelu, x, 0.1F), floats(*set, "unary.leaky_relu")) < tolerance, "cpu LeakyRelu matches");
-    check(worst(TK::cpu::unary(TK::UnaryOp::Silu, x), floats(*set, "unary.silu")) < tolerance, "cpu Silu matches");
-    check(worst(TK::cpu::snake(floats(*set, "snake.x"), floats(*set, "snake.a"), 3, 5), floats(*set, "snake.y")) < tolerance,
-        "cpu Snake with one a per channel matches");
+    EXPECT_TRUE(worst(TK::cpu::unary(TK::UnaryOp::Exp, x, 20.0F), floats(*set, "unary.exp")) < tolerance) << "cpu Exp with a cap matches clamp(exp(x))";
+    EXPECT_TRUE(worst(TK::cpu::unary(TK::UnaryOp::Log, positive, 1.0e-7F), floats(*set, "unary.log")) < tolerance) << "cpu Log with a floor matches log(clamp(x))";
+    EXPECT_TRUE(worst(TK::cpu::unary(TK::UnaryOp::Sin, x), floats(*set, "unary.sin")) < tolerance) << "cpu Sin matches";
+    EXPECT_TRUE(worst(TK::cpu::unary(TK::UnaryOp::Cos, x), floats(*set, "unary.cos")) < tolerance) << "cpu Cos matches";
+    EXPECT_TRUE(worst(TK::cpu::unary(TK::UnaryOp::Tanh, x), floats(*set, "unary.tanh")) < tolerance) << "cpu Tanh matches";
+    EXPECT_TRUE(worst(TK::cpu::unary(TK::UnaryOp::LeakyRelu, x, 0.1F), floats(*set, "unary.leaky_relu")) < tolerance) << "cpu LeakyRelu matches";
+    EXPECT_TRUE(worst(TK::cpu::unary(TK::UnaryOp::Silu, x), floats(*set, "unary.silu")) < tolerance) << "cpu Silu matches";
+    EXPECT_TRUE(worst(TK::cpu::snake(floats(*set, "snake.x"), floats(*set, "snake.a"), 3, 5), floats(*set, "snake.y")) < tolerance) << "cpu Snake with one a per channel matches";
 
     const TK::ConvTranspose1d layer { .c_in = 3, .c_out = 4, .kernel = 4, .stride = 3, .pad = 1, .output_pad = 1, .dilation = 2 };
     const auto* expected = set->find("conv_transpose.y");
-    check(expected && expected->spec().shape.back() == TK::conv_transpose1d_length(layer, 5),
-        "conv_transpose1d_length matches PyTorch's output length");
-    check(worst(TK::cpu::conv_transpose1d(layer, floats(*set, "conv_transpose.x"), floats(*set, "conv_transpose.w"),
+    EXPECT_TRUE(expected && expected->spec().shape.back() == TK::conv_transpose1d_length(layer, 5)) << "conv_transpose1d_length matches PyTorch's output length";
+    EXPECT_TRUE(worst(TK::cpu::conv_transpose1d(layer, floats(*set, "conv_transpose.x"), floats(*set, "conv_transpose.w"),
                     floats(*set, "conv_transpose.b"), 2, 5),
               floats(*set, "conv_transpose.y"))
-            < 1.0e-5,
-        "cpu transposed convolution with stride, padding, output padding and dilation matches PyTorch");
+            < 1.0e-5) << "cpu transposed convolution with stride, padding, output padding and dilation matches PyTorch";
 
     constexpr uint32_t n = 1024;
     constexpr uint32_t hop = 256;
@@ -288,21 +259,24 @@ void test_cpu_kernels()
     std::vector<float> squared(n);
     std::ranges::transform(window, squared.begin(), [](float w) { return w * w; });
     const auto signal = TK::cpu::overlap_add(frame_values, squared, n, frames, hop, n / 2, hop * (frames - 1));
-    check(worst(signal, floats(*set, "istft.y")) < 1.0e-5,
-        "inverse_dft_basis then overlap_add with the squared window equals torch.istft(center=True)");
+    EXPECT_TRUE(worst(signal, floats(*set, "istft.y")) < 1.0e-5) << "inverse_dft_basis then overlap_add with the squared window equals torch.istft(center=True)";
 }
+
+/** Registers the safetensors and torch formats, once per test process. */
+class Formats : public ::testing::Environment {
+public:
+    void SetUp() override
+    {
+        IO::SafetensorsReader::register_with_registry();
+        IO::TorchCheckpointReader::register_with_registry();
+    }
+};
 
 }
 
-int main()
+int main(int argc, char** argv)
 {
-    test_state_dict();
-    test_nested();
-    test_refusals();
-    test_registry();
-    test_vocos_checkpoint();
-    test_cpu_kernels();
-
-    MF_PRINT("{} of {} checks passed", g_checks - g_failures, g_checks);
-    return g_failures == 0 ? 0 : 1;
+    testing::InitGoogleTest(&argc, argv);
+    testing::AddGlobalTestEnvironment(new Formats);
+    return RUN_ALL_TESTS();
 }

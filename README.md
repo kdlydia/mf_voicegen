@@ -46,14 +46,14 @@ cmake --build --preset release
 ctest --preset release
 ```
 
-`ctest` runs both tests. `test_mf_voicegen_gpu` needs a Vulkan device and skips without one. Run either from `test/build` to see each check.
+The tests use GoogleTest. CMake takes an installed GTest package, or downloads the pinned 1.18.0 release when there is none, so building them without a network needs GTest installed. `ctest` runs each test on its own. The GPU tests skip without a Vulkan device, and `Gpu.VocosMatchesPyTorch` skips until `generate_reference.py --vocos-src` has written the PyTorch reference.
 
-- `test_mf_voicegen`, 43 checks:
+- `test_mf_voicegen`, 6 tests:
   - the reader on `torch.save` files: every element type, transposed and offset views, nested dictionaries, parameters, the old format, damaged files;
   - the format registry;
   - the Vocos checkpoint;
   - the CPU kernels against PyTorch, including `inverse_dft_basis` with `overlap_add` against `torch.istft`.
-- `test_mf_voicegen_gpu`, 23 checks:
+- `test_mf_voicegen_gpu`, 7 tests:
   - each kernel against its CPU version;
   - Vocos on a LibriSpeech excerpt, writing `test/build/vocos_resynthesis.wav` to listen to.
 - `generate_reference.py` writes the fixtures; `test/README.md` says where they come from.

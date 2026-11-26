@@ -14,11 +14,13 @@
 #include <fstream>
 #include <random>
 
+#include <gtest/gtest.h>
+
 // Brings up a headless Vulkan device, as MayaFlux's own GPU tests do, runs each
 // kernel against its CPU version, then runs Vocos on a LibriSpeech excerpt.
 // When generate_reference.py has written the Vocos fixtures, the spectrogram
 // and audio are compared with the original PyTorch code; otherwise only
-// self-consistency is checked.
+// self-consistency is checked and the comparison is skipped.
 
 namespace {
 
@@ -27,20 +29,63 @@ namespace fs = std::filesystem;
 namespace TK = Yantra::TensorKernels;
 using Clock = std::chrono::steady_clock;
 
-int g_failures = 0;
-int g_checks = 0;
-
-void check(bool ok, std::string_view what)
-{
-    ++g_checks;
-    if (!ok) {
-        ++g_failures;
-    }
-    MF_PRINT("{}  {}", ok ? "PASS" : "FAIL", what);
-}
-
 const fs::path k_root = MF_VOICEGEN_TEST_DIR;
 const fs::path k_vocos = k_root / "data/tensors/vocos_mel_24khz/pytorch_model.bin";
+
+/** One headless Vulkan device per test process, brought up as MayaFlux's own GPU tests do. */
+class Device : public ::testing::Environment {
+public:
+    enum class State : uint8_t {
+        Absent,
+        Broken,
+        Ready
+    };
+
+    void SetUp() override
+    {
+        Core::GlobalGraphicsConfig config;
+        config.windowing_backend = Core::GlobalGraphicsConfig::WindowingBackend::NONE;
+        config.backend_info.require_presentation = false;
+        m_backend = std::make_shared<Core::VulkanBackend>();
+        if (!m_backend->initialize(config)) {
+            m_backend.reset();
+            return;
+        }
+        s_state = Portal::Graphics::get_shader_foundry().initialize(m_backend) && Portal::Graphics::get_compute_press().initialize()
+            ? State::Ready
+            : State::Broken;
+    }
+
+    void TearDown() override
+    {
+        if (s_state == State::Ready) {
+            Portal::Graphics::get_compute_press().shutdown();
+            Portal::Graphics::get_shader_foundry().shutdown();
+        }
+        if (m_backend) {
+            m_backend->cleanup();
+        }
+        s_state = State::Absent;
+    }
+
+    static State state() { return s_state; }
+
+private:
+    std::shared_ptr<Core::VulkanBackend> m_backend;
+    static inline State s_state { State::Absent };
+};
+
+/** Skips a test without a device, and fails it when the device is there but the shader foundry did not start. */
+class Gpu : public ::testing::Test {
+protected:
+    void SetUp() override
+    {
+        if (Device::state() == Device::State::Absent) {
+            GTEST_SKIP() << "no usable Vulkan device";
+        }
+        ASSERT_EQ(Device::state(), Device::State::Ready) << "the shader foundry or compute press did not start";
+    }
+};
 
 double worst(std::span<const float> a, std::span<const float> b)
 {
@@ -143,7 +188,7 @@ struct Bench {
     void run(std::vector<Yantra::DependencyStage> stages) { context->record_stages(stages); }
 };
 
-void test_unary()
+TEST_F(Gpu, UnaryMatchesTheCpu)
 {
     struct Case {
         TK::UnaryOp op;
@@ -174,7 +219,7 @@ void test_unary()
         const uint64_t dst = bench.space(1, x.size());
         bench.run({ TK::unary_stage(c.op, src, dst, static_cast<uint32_t>(x.size()), c.alpha, c.beta) });
         const double error = worst(bench.get(1, x.size()), TK::cpu::unary(c.op, x, c.alpha, c.beta));
-        check(error < 1.0e-5, std::format("nn_unary {} matches the CPU (worst {:.2e})", c.name, error));
+        EXPECT_TRUE(error < 1.0e-5) << std::format("nn_unary {} matches the CPU (worst {:.2e})", c.name, error);
     }
 
     Bench bench;
@@ -185,10 +230,10 @@ void test_unary()
     bench.space(2, x.size());
     bench.run({ TK::snake_stage(src, params, bench.space(2, x.size()), 2, 3, 50) });
     const double error = worst(bench.get(2, x.size()), TK::cpu::snake(x, a, 3, 50));
-    check(error < 1.0e-5, std::format("nn_unary Snake with one a per channel matches the CPU (worst {:.2e})", error));
+    EXPECT_TRUE(error < 1.0e-5) << std::format("nn_unary Snake with one a per channel matches the CPU (worst {:.2e})", error);
 }
 
-void test_large_grid()
+TEST_F(Gpu, LargeDispatchReachesEveryElement)
 {
     Bench bench;
     constexpr size_t count = 3'000'000;
@@ -197,11 +242,10 @@ void test_large_grid()
     const uint64_t src = bench.put(0, x);
     bench.run({ TK::unary_stage(TK::UnaryOp::Affine, src, bench.space(1, count), count, 2.0F, 1.0F) });
     const auto y = bench.get(1, count);
-    check(y[0] == 1.0F && y[count / 2] == 2.0F * static_cast<float>(count / 2) + 1.0F && y[count - 1] == 2.0F * static_cast<float>(count - 1) + 1.0F,
-        "a dispatch past one axis of workgroups reaches every element");
+    EXPECT_TRUE(y[0] == 1.0F && y[count / 2] == 2.0F * static_cast<float>(count / 2) + 1.0F && y[count - 1] == 2.0F * static_cast<float>(count - 1) + 1.0F) << "a dispatch past one axis of workgroups reaches every element";
 }
 
-void test_multiply()
+TEST_F(Gpu, MultiplyMatchesTheCpu)
 {
     Bench bench;
     const auto a = random_values(4 * 30, -2.0F, 2.0F, 21);
@@ -209,10 +253,10 @@ void test_multiply()
     const uint64_t pa = bench.put(0, a);
     const uint64_t pb = bench.put(1, b);
     bench.run({ TK::multiply_stage(pa, pb, bench.space(2, a.size()), static_cast<uint32_t>(a.size()), 30, 4) });
-    check(bench.get(2, a.size()) == TK::cpu::multiply(a, b, 30), "nn_multiply scales each channel of [4, 30] exactly as the CPU");
+    EXPECT_TRUE(bench.get(2, a.size()) == TK::cpu::multiply(a, b, 30)) << "nn_multiply scales each channel of [4, 30] exactly as the CPU";
 }
 
-void test_conv_transpose()
+TEST_F(Gpu, ConvTransposeMatchesTheCpu)
 {
     Bench bench;
     const TK::ConvTranspose1d layer { .c_in = 5, .c_out = 6, .kernel = 7, .stride = 4, .pad = 2, .output_pad = 1,
@@ -229,10 +273,10 @@ void test_conv_transpose()
     const uint64_t pb = bench.put(2, b);
     bench.run({ TK::conv_transpose1d_stage(layer, px, pw, pb, bench.space(3, out_count), batch, t_in) });
     const double error = worst(bench.get(3, out_count), TK::cpu::conv_transpose1d(layer, x, w, b, batch, t_in));
-    check(error < 1.0e-5, std::format("nn_conv_transpose1d with bias, ReLU input and GELU matches the CPU (worst {:.2e})", error));
+    EXPECT_TRUE(error < 1.0e-5) << std::format("nn_conv_transpose1d with bias, ReLU input and GELU matches the CPU (worst {:.2e})", error);
 }
 
-void test_overlap_add()
+TEST_F(Gpu, OverlapAddMatchesTheCpu)
 {
     constexpr uint32_t length = 64;
     constexpr uint32_t frames = 20;
@@ -253,8 +297,8 @@ void test_overlap_add()
         TK::overlap_add_stage(pf, 0, bench.space(3, samples), length, frames, hop, 0, samples) });
     const double normalised = worst(bench.get(2, samples), TK::cpu::overlap_add(values, squared, length, frames, hop, trim, samples));
     const double summed = worst(bench.get(3, samples), TK::cpu::overlap_add(values, {}, length, frames, hop, 0, samples));
-    check(normalised < 1.0e-5, std::format("nn_overlap_add divided by the window envelope matches the CPU (worst {:.2e})", normalised));
-    check(summed < 1.0e-6, std::format("nn_overlap_add as a plain sum matches the CPU (worst {:.2e})", summed));
+    EXPECT_TRUE(normalised < 1.0e-5) << std::format("nn_overlap_add divided by the window envelope matches the CPU (worst {:.2e})", normalised);
+    EXPECT_TRUE(summed < 1.0e-6) << std::format("nn_overlap_add as a plain sum matches the CPU (worst {:.2e})", summed);
 }
 
 double snr_db(std::span<const float> signal, std::span<const float> reference)
@@ -268,45 +312,57 @@ double snr_db(std::span<const float> signal, std::span<const float> reference)
     return 10.0 * std::log10(power / std::max(error, 1e-30));
 }
 
-void test_vocos()
+/** The Vocos weights and the speech fixture, or why a test cannot run. */
+struct VocosInputs {
+    std::optional<Kakshya::TensorSet> weights;
+    std::vector<float> audio;
+    std::string missing;
+};
+
+VocosInputs vocos_inputs()
 {
+    VocosInputs inputs;
     if (!fs::exists(k_vocos)) {
-        MF_PRINT("SKIP  Vocos checkpoint not fetched ({})", k_vocos.string());
-        return;
+        inputs.missing = "Vocos checkpoint not fetched: " + k_vocos.string();
+        return inputs;
+    }
+    inputs.audio = read_f32(k_root / "fixtures/speech_24k.f32");
+    if (inputs.audio.empty()) {
+        inputs.missing = "no speech fixture (run generate_reference.py --speech)";
+        return inputs;
     }
     IO::TorchCheckpointReader reader;
-    auto weights = reader.open(k_vocos.string()) ? reader.read_tensors() : std::nullopt;
-    check(weights.has_value(), "the Vocos checkpoint reads");
-    if (!weights) {
-        return;
+    inputs.weights = reader.open(k_vocos.string()) ? reader.read_tensors() : std::nullopt;
+    return inputs;
+}
+
+TEST_F(Gpu, VocosResynthesisKeepsTheSpectrogram)
+{
+    const auto inputs = vocos_inputs();
+    if (!inputs.missing.empty()) {
+        GTEST_SKIP() << inputs.missing;
     }
+    ASSERT_TRUE(inputs.weights.has_value()) << "the Vocos checkpoint reads";
 
     const auto built = Clock::now();
-    Yantra::VocosModel model(*weights);
+    Yantra::VocosModel model(*inputs.weights);
     MF_PRINT("      model ready in {} ms", std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - built).count());
 
-    const auto audio = read_f32(k_root / "fixtures/speech_24k.f32");
-    if (audio.empty()) {
-        MF_PRINT("SKIP  no speech fixture (run generate_reference.py --speech)");
-        return;
-    }
-    const bool have_reference = fs::exists(k_root / "fixtures/vocos_output.f32");
+    const auto& audio = inputs.audio;
     const uint32_t frames = Yantra::VocosModel::frame_count(audio.size());
 
     const auto mel = model.mel(audio);
-    check(mel.size() == static_cast<size_t>(Yantra::VocosModel::mels) * frames
-            && std::ranges::all_of(mel, [](float v) { return std::isfinite(v) && v >= std::log(1.0e-7F) - 1e-4F && v < 10.0F; }),
-        std::format("mel gives {} finite log values for {} frames", mel.size(), frames));
+    EXPECT_TRUE(mel.size() == static_cast<size_t>(Yantra::VocosModel::mels) * frames
+            && std::ranges::all_of(mel, [](float v) { return std::isfinite(v) && v >= std::log(1.0e-7F) - 1e-4F && v < 10.0F; })) << std::format("mel gives {} finite log values for {} frames", mel.size(), frames);
 
     const auto started = Clock::now();
     const auto output = model.resynthesize(audio);
     const double ms = std::chrono::duration<double, std::milli>(Clock::now() - started).count();
-    check(output.size() == Yantra::VocosModel::sample_count(frames) && std::ranges::all_of(output, [](float v) { return std::isfinite(v); }),
-        std::format("resynthesize gives {} finite samples in {:.0f} ms for {:.2f} s of audio", output.size(), ms,
-            static_cast<double>(audio.size()) / Yantra::VocosModel::sample_rate));
+    EXPECT_TRUE(output.size() == Yantra::VocosModel::sample_count(frames) && std::ranges::all_of(output, [](float v) { return std::isfinite(v); })) << std::format("resynthesize gives {} finite samples in {:.0f} ms for {:.2f} s of audio", output.size(), ms,
+            static_cast<double>(audio.size()) / Yantra::VocosModel::sample_rate);
 
     const auto split = model.synthesize(mel, frames);
-    check(worst(split, output) < 1.0e-5, "synthesize(mel(x)) equals resynthesize(x), recorded as one submission");
+    EXPECT_TRUE(worst(split, output) < 1.0e-5) << "synthesize(mel(x)) equals resynthesize(x), recorded as one submission";
 
     const auto again = model.mel(output);
     double deviation = 0.0;
@@ -318,8 +374,7 @@ void test_vocos()
         }
     }
     deviation /= static_cast<double>(std::max<size_t>(counted, 1));
-    check(counted > 0 && deviation < 0.3,
-        std::format("the resynthesis has the input's spectrogram: mean log mel difference {:.3f} over {} cells", deviation, counted));
+    EXPECT_TRUE(counted > 0 && deviation < 0.3) << std::format("the resynthesis has the input's spectrogram: mean log mel difference {:.3f} over {} cells", deviation, counted);
 
     for (const auto& [name, values] : { std::pair { "vocos_input.f32", &audio }, std::pair { "vocos_mel.f32", &mel },
              std::pair { "vocos_resynthesis.f32", &output } }) {
@@ -330,11 +385,25 @@ void test_vocos()
     write_wav(wav, output, Yantra::VocosModel::sample_rate);
     write_wav(k_root / "build/vocos_input.wav", audio, Yantra::VocosModel::sample_rate);
     MF_PRINT("      wrote {} and vocos_input.wav", wav.string());
+}
 
-    if (!have_reference) {
-        MF_PRINT("SKIP  no PyTorch reference in fixtures (run generate_reference.py --vocos-src)");
-        return;
+TEST_F(Gpu, VocosMatchesPyTorch)
+{
+    const auto inputs = vocos_inputs();
+    if (!inputs.missing.empty()) {
+        GTEST_SKIP() << inputs.missing;
     }
+    if (!fs::exists(k_root / "fixtures/vocos_output.f32")) {
+        GTEST_SKIP() << "no PyTorch reference in fixtures (run generate_reference.py --vocos-src)";
+    }
+    ASSERT_TRUE(inputs.weights.has_value()) << "the Vocos checkpoint reads";
+
+    Yantra::VocosModel model(*inputs.weights);
+    const auto& audio = inputs.audio;
+    const uint32_t frames = Yantra::VocosModel::frame_count(audio.size());
+    const auto mel = model.mel(audio);
+    const auto output = model.resynthesize(audio);
+
     const auto mel_reference = read_f32(k_root / "fixtures/vocos_mel.f32");
     const auto output_reference = read_f32(k_root / "fixtures/vocos_output.f32");
 
@@ -344,51 +413,20 @@ void test_vocos()
             mel_error = std::max(mel_error, std::abs(static_cast<double>(mel[i]) - mel_reference[i]));
         }
     }
-    check(mel.size() == mel_reference.size() && mel_error < 1.0e-2,
-        std::format("mel matches Vocos's feature extractor (worst {:.2e} where the band is above e^-9)", mel_error));
+    EXPECT_TRUE(mel.size() == mel_reference.size() && mel_error < 1.0e-2) << std::format("mel matches Vocos's feature extractor (worst {:.2e} where the band is above e^-9)", mel_error);
 
     const auto from_reference = model.synthesize(mel_reference, frames);
     const double decoded = snr_db(from_reference, output_reference);
-    check(from_reference.size() == output_reference.size() && decoded > 50.0,
-        std::format("synthesize matches Vocos's decode to {:.1f} dB", decoded));
+    EXPECT_TRUE(from_reference.size() == output_reference.size() && decoded > 50.0) << std::format("synthesize matches Vocos's decode to {:.1f} dB", decoded);
     const double round_trip = snr_db(output, output_reference);
-    check(round_trip > 40.0, std::format("resynthesize matches Vocos's forward to {:.1f} dB", round_trip));
+    EXPECT_TRUE(round_trip > 40.0) << std::format("resynthesize matches Vocos's forward to {:.1f} dB", round_trip);
 }
 
 }
 
-int main()
+int main(int argc, char** argv)
 {
-    Core::GlobalGraphicsConfig config;
-    config.windowing_backend = Core::GlobalGraphicsConfig::WindowingBackend::NONE;
-    config.backend_info.require_presentation = false;
-    auto backend = std::make_shared<Core::VulkanBackend>();
-    if (!backend->initialize(config)) {
-        MF_PRINT("SKIP  no usable Vulkan device");
-        return 0;
-    }
-    auto& foundry = Portal::Graphics::get_shader_foundry();
-    auto& press = Portal::Graphics::get_compute_press();
-    if (!foundry.initialize(backend) || !press.initialize()) {
-        MF_PRINT("FAIL  the shader foundry or compute press did not start");
-        return 1;
-    }
-
-    try {
-        test_unary();
-        test_large_grid();
-        test_multiply();
-        test_conv_transpose();
-        test_overlap_add();
-        test_vocos();
-    } catch (const std::exception& e) {
-        check(false, std::format("threw: {}", e.what()));
-    }
-
-    press.shutdown();
-    foundry.shutdown();
-    backend->cleanup();
-
-    MF_PRINT("{} of {} checks passed", g_checks - g_failures, g_checks);
-    return g_failures == 0 ? 0 : 1;
+    testing::InitGoogleTest(&argc, argv);
+    testing::AddGlobalTestEnvironment(new Device);
+    return RUN_ALL_TESTS();
 }
