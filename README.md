@@ -40,12 +40,13 @@ void compose()
 ## Tests
 
 ```sh
-cmake -G Ninja -B test/build -S test -DCMAKE_BUILD_TYPE=Release
-cmake --build test/build
 python3 <MayaFlux>/scripts/fetch_assets.py --list community.json --data test/data
-./test/build/test_mf_voicegen       # no device needed
-./test/build/test_mf_voicegen_gpu   # needs a Vulkan device
+cmake --preset release
+cmake --build --preset release
+ctest --preset release
 ```
+
+`ctest` runs both tests. `test_mf_voicegen_gpu` needs a Vulkan device and skips without one. Run either from `test/build` to see each check.
 
 - `test_mf_voicegen`, 43 checks:
   - the reader on `torch.save` files: every element type, transposed and offset views, nested dictionaries, parameters, the old format, damaged files;

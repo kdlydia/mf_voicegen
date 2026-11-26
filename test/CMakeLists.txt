@@ -1,4 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
+
+set(MF_MIN_VERSION "1.0.0")
+set(MF_NEEDS_LILA OFF)
 project(mf_voicegen_test LANGUAGES C CXX)
 
 enable_testing()
@@ -6,6 +9,9 @@ enable_testing()
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+endif()
 
 add_compile_definitions(MAYAFLUX_PROJECT)
 
@@ -39,6 +45,11 @@ set(MF_VOICEGEN_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
 file(GLOB_RECURSE _mf_voicegen_sources CONFIGURE_DEPENDS
     "${MF_VOICEGEN_ROOT}/src/*.cpp"
 )
+if(NOT _mf_voicegen_sources)
+    set(_mf_voicegen_empty_source "${CMAKE_CURRENT_BINARY_DIR}/empty_module.cpp")
+    file(WRITE "${_mf_voicegen_empty_source}" "")
+    list(APPEND _mf_voicegen_sources "${_mf_voicegen_empty_source}")
+endif()
 
 add_library(mf_voicegen OBJECT ${_mf_voicegen_sources})
 
@@ -52,6 +63,10 @@ target_compile_definitions(mf_voicegen PUBLIC MF_VOICEGEN_SHADER_DIR="${MF_VOICE
 target_precompile_headers(mf_voicegen PUBLIC "${MayaFlux_PCH_FILE}")
 target_link_libraries(mf_voicegen PUBLIC MayaFlux::MayaFluxLib)
 
+if(MF_NEEDS_LILA)
+    target_link_libraries(mf_voicegen PUBLIC MayaFlux::MayaFluxHost)
+endif()
+
 # Fixtures and fetched weights are found from here, wherever the tests run.
 add_compile_definitions(MF_VOICEGEN_TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
@@ -62,6 +77,19 @@ add_executable(test_mf_voicegen
 )
 target_precompile_headers(test_mf_voicegen REUSE_FROM mf_voicegen)
 target_link_libraries(test_mf_voicegen PRIVATE mf_voicegen MayaFlux::MayaFluxLib)
+
+if(WIN32)
+    # MayaFlux's imported targets expose their DLL locations to this expression.
+    # Place them beside the executable before CTest runs or discovers tests.
+    add_custom_command(TARGET test_mf_voicegen POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy
+            $<TARGET_RUNTIME_DLLS:test_mf_voicegen>
+            $<TARGET_FILE_DIR:test_mf_voicegen>
+        COMMAND_EXPAND_LISTS
+        VERBATIM
+    )
+endif()
+
 add_test(NAME mf_voicegen COMMAND test_mf_voicegen)
 
 # On a Vulkan device: the kernels against their CPU versions, and Vocos against PyTorch.
@@ -71,6 +99,19 @@ add_executable(test_mf_voicegen_gpu
 )
 target_precompile_headers(test_mf_voicegen_gpu REUSE_FROM mf_voicegen)
 target_link_libraries(test_mf_voicegen_gpu PRIVATE mf_voicegen MayaFlux::MayaFluxLib)
+
+if(WIN32)
+    # MayaFlux's imported targets expose their DLL locations to this expression.
+    # Place them beside the executable before CTest runs or discovers tests.
+    add_custom_command(TARGET test_mf_voicegen_gpu POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy
+            $<TARGET_RUNTIME_DLLS:test_mf_voicegen_gpu>
+            $<TARGET_FILE_DIR:test_mf_voicegen_gpu>
+        COMMAND_EXPAND_LISTS
+        VERBATIM
+    )
+endif()
+
 add_test(NAME mf_voicegen_gpu COMMAND test_mf_voicegen_gpu)
 
 if(UNIX)
