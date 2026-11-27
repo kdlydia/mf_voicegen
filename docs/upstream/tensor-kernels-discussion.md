@@ -11,7 +11,7 @@ With the public `TensorKernels` headers, a model can now be written outside Maya
 | `nn_conv_transpose1d` | 72 bytes, as `nn_conv1d` | PyTorch's `conv_transpose1d` with stride, padding, output padding and dilation. Each invocation gathers its own output, with no atomics. |
 | `nn_overlap_add` | 48 bytes | Overlap-add of `[frame_length, frames]`, optionally divided by the summed squared window. After a pointwise convolution with an inverse DFT basis, it is `torch.istft`. |
 
-Each has a stage function in the style of `Stages.hpp` and a CPU version. They are tested against PyTorch and against each other on an Iris Xe. Vocos built from them matches Vocos's forward pass, written with PyTorch's own functions, at 103 dB SNR on speech. The comparison with the original Vocos code is still to run.
+Each has a stage function in the style of `Stages.hpp` and a CPU version. They are tested against PyTorch and against each other on an Iris Xe. Vocos built from them matches the original Vocos code on speech: decoding the same mel spectrogram agrees to 102.8 dB SNR, and the whole round trip, with the mel computed on the GPU, to 84.2 dB.
 
 Two things came up on the way:
 

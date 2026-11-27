@@ -420,6 +420,7 @@ TEST_F(Gpu, VocosMatchesPyTorch)
     EXPECT_TRUE(from_reference.size() == output_reference.size() && decoded > 50.0) << std::format("synthesize matches Vocos's decode to {:.1f} dB", decoded);
     const double round_trip = snr_db(output, output_reference);
     EXPECT_TRUE(round_trip > 40.0) << std::format("resynthesize matches Vocos's forward to {:.1f} dB", round_trip);
+    MF_PRINT("      against the original Vocos: mel worst {:.2e}, decode {:.1f} dB, mel and decode {:.1f} dB", mel_error, decoded, round_trip);
 }
 
 }

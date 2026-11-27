@@ -9,6 +9,6 @@ Written by `generate_reference.py`. The `.f32` files are raw little endian float
 | `legacy.pt` | The same kind of file in the format written before PyTorch 1.6, which the reader refuses. |
 | `kernels.safetensors` | Inputs and PyTorch outputs for the unary functions, Snake, `conv_transpose1d` and `torch.istft`. |
 | `speech_24k.f32` | 3 s of speech at 24 kHz. |
-| `vocos_mel.f32`, `vocos_output.f32` | The mel spectrogram (100 bands, band after band) and the decoded audio from the original Vocos code for `speech_24k.f32`. Not generated yet. |
+| `vocos_mel.f32`, `vocos_output.f32` | The mel spectrogram (100 bands, band after band) and the decoded audio from the original Vocos code (github.com/gemelo-ai/vocos at `eb39abf`) for `speech_24k.f32`. |
 
 `speech_24k.f32` is `hubert_speech_audio.f32` from MayaFlux's own tests (`mayaflux-tests/models/hubert_phoneme`), resampled from 16 to 24 kHz with torchaudio. That file is the first 3 s of `https://cdn-media.huggingface.co/speech_samples/sample1.flac`, "LibriSpeech sample 1". LibriSpeech (Panayotov, Chen, Povey and Khudanpur, 2015, https://www.openslr.org/12) is released under CC BY 4.0.

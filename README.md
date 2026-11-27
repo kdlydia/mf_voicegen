@@ -46,7 +46,7 @@ cmake --build --preset release
 ctest --preset release
 ```
 
-The tests use GoogleTest. CMake takes an installed GTest package, or downloads the pinned 1.18.0 release when there is none, so building them without a network needs GTest installed. `ctest` runs each test on its own. The GPU tests skip without a Vulkan device, and `Gpu.VocosMatchesPyTorch` skips until `generate_reference.py --vocos-src` has written the PyTorch reference.
+The tests use GoogleTest. CMake takes an installed GTest package, or downloads the pinned 1.18.0 release when there is none, so building them without a network needs GTest installed. `ctest` runs each test on its own. The GPU tests skip without a Vulkan device. `Gpu.VocosMatchesPyTorch` compares against the original Vocos code: the mel spectrogram agrees to 2.5e-3 in log magnitude, decoding the same mel to 102.8 dB SNR, and the whole round trip to 84.2 dB.
 
 - `test_mf_voicegen`, 6 tests:
   - the reader on `torch.save` files: every element type, transposed and offset views, nested dictionaries, parameters, the old format, damaged files;
