@@ -26,6 +26,8 @@ layout(push_constant) uniform PC {
     uint pad;
     uint flags;
     uint dilation;
+    uint groups;
+    uint reserved;
 } pc;
 
 const uint FLAG_BIAS = 1u;
@@ -54,7 +56,10 @@ uint invocation_index()
 /**
  * @brief Transposed one dimensional convolution over [batch, c_in, t_in] into [batch, c_out, t_out].
  *
- * weights are [c_in, c_out, kernel_size], as PyTorch stores them. Input step ti
+ * weights are [c_in, c_out / groups, kernel_size], as PyTorch stores them. With
+ * groups above 1 the channels split into equal runs and an output channel reads
+ * only the input channels of its own run; groups equal to the channels is
+ * depthwise. Input step ti
  * tap k lands on output position ti * stride + k * dilation - pad; outputs past
  * t_out are dropped, so t_out also expresses an output padding. Each invocation
  * gathers the inputs that land on its own output, so no two write the same
@@ -81,6 +86,12 @@ void main()
     const uint dilation = max(pc.dilation, 1u);
     const int base = int(to) + int(pc.pad);
 
+    const uint groups = max(pc.groups, 1u);
+    const uint in_per_group = pc.c_in / groups;
+    const uint out_per_group = pc.c_out / groups;
+    const uint group = co / out_per_group;
+    const uint co_local = co - group * out_per_group;
+
     for (uint k = 0u; k < pc.kernel_size; ++k) {
         const int reach = base - int(k * dilation);
         if (reach < 0 || uint(reach) % stride != 0u)
@@ -88,11 +99,12 @@ void main()
         const uint ti = uint(reach) / stride;
         if (ti >= pc.t_in)
             continue;
-        for (uint ci = 0u; ci < pc.c_in; ++ci) {
+        for (uint i = 0u; i < in_per_group; ++i) {
+            const uint ci = group * in_per_group + i;
             float x = pc.src.v[(n * pc.c_in + ci) * pc.t_in + ti];
             if (relu_input)
                 x = max(x, 0.0);
-            acc += pc.weights.v[(ci * pc.c_out + co) * pc.kernel_size + k] * x;
+            acc += pc.weights.v[(ci * out_per_group + co_local) * pc.kernel_size + k] * x;
         }
     }
 

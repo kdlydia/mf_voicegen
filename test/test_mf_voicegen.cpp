@@ -24,6 +24,7 @@ namespace TK = Yantra::TensorKernels;
 
 const fs::path k_root = MF_VOICEGEN_TEST_DIR;
 const fs::path k_vocos = k_root / "data/tensors/vocos_mel_24khz/pytorch_model.bin";
+const fs::path k_kokoro = k_root / "data/tensors/kokoro_82m/kokoro-v1_0.pth";
 
 std::string fixture(std::string_view name)
 {
@@ -203,6 +204,23 @@ TEST(VocosModel, Checkpoint)
     EXPECT_TRUE(Yantra::VocosModel::diagnose(damaged).contains("backbone.convnext.3.gamma")) << "diagnose names a missing tensor";
 }
 
+TEST(TorchCheckpointReader, KokoroCheckpoint)
+{
+    if (!fs::exists(k_kokoro)) {
+        GTEST_SKIP() << "Kokoro checkpoint not fetched: " << k_kokoro.string();
+    }
+    IO::TorchCheckpointReader reader;
+    ASSERT_TRUE(reader.open(k_kokoro.string())) << "kokoro-v1_0.pth opens: " << reader.get_last_error();
+    EXPECT_TRUE(reader.describe().size() == 548) << "the Kokoro checkpoint lists 548 tensors, five state_dicts under one dictionary";
+    const auto weights = reader.read_tensors();
+    ASSERT_TRUE(weights) << "the Kokoro checkpoint reads";
+    const auto* embedding = weights->find("text_encoder.module.embedding.weight");
+    EXPECT_TRUE((embedding && embedding->spec().shape == std::vector<uint64_t> { 178, 512 })) << "the text encoder's embedding is 178 by 512";
+    const auto g = floats(*weights, "decoder.module.generator.conv_post.weight_g");
+    const auto v = floats(*weights, "decoder.module.generator.conv_post.weight_v");
+    EXPECT_TRUE(g.size() == 22 && v.size() == 22 * 128 * 7 && TK::fold_weight_norm(g, v).size() == v.size()) << "conv_post's weight norm folds into 22 by 128 by 7 weights";
+}
+
 TEST(VoiceKernels, CpuMatchesPyTorch)
 {
     IO::SafetensorsReader reader;
@@ -260,6 +278,100 @@ TEST(VoiceKernels, CpuMatchesPyTorch)
     std::ranges::transform(window, squared.begin(), [](float w) { return w * w; });
     const auto signal = TK::cpu::overlap_add(frame_values, squared, n, frames, hop, n / 2, hop * (frames - 1));
     EXPECT_TRUE(worst(signal, floats(*set, "istft.y")) < 1.0e-5) << "inverse_dft_basis then overlap_add with the squared window equals torch.istft(center=True)";
+}
+
+std::vector<int32_t> indices(std::span<const float> values)
+{
+    std::vector<int32_t> out(values.size());
+    std::ranges::transform(values, out.begin(), [](float v) { return static_cast<int32_t>(v); });
+    return out;
+}
+
+/** The operations Kokoro needs beyond Vocos's, against PyTorch. */
+TEST(VoiceKernels, KokoroOperationsMatchPyTorch)
+{
+    IO::SafetensorsReader reader;
+    ASSERT_TRUE(reader.open(fixture("kernels.safetensors"))) << "kernels.safetensors opens";
+    const auto set = reader.read_tensors();
+    ASSERT_TRUE(set) << "kernels.safetensors reads";
+
+    constexpr double tolerance = 2.0e-6;
+    const auto x = floats(*set, "unary.x");
+    EXPECT_TRUE(worst(TK::cpu::unary(TK::UnaryOp::GeluTanh, x), floats(*set, "unary.gelu_tanh")) < tolerance) << "cpu GeluTanh matches gelu(approximate='tanh')";
+    EXPECT_TRUE(worst(TK::cpu::unary(TK::UnaryOp::Fract, floats(*set, "unary.fract_x")), floats(*set, "unary.fract")) < tolerance) << "cpu Fract matches remainder(x, 1)";
+    EXPECT_TRUE(TK::cpu::unary(TK::UnaryOp::Step, x, 0.5F) == floats(*set, "unary.step")) << "cpu Step matches x > 0.5";
+
+    const auto a = floats(*set, "binary.a");
+    const auto b = floats(*set, "binary.b");
+    const std::pair<TK::BinaryOp, const char*> ops[] = {
+        { TK::BinaryOp::Multiply, "binary.multiply" },
+        { TK::BinaryOp::Add, "binary.add" },
+        { TK::BinaryOp::Subtract, "binary.subtract" },
+        { TK::BinaryOp::Divide, "binary.divide" },
+        { TK::BinaryOp::Maximum, "binary.maximum" },
+        { TK::BinaryOp::Minimum, "binary.minimum" },
+        { TK::BinaryOp::Atan2, "binary.angle" },
+    };
+    for (const auto& [op, name] : ops) {
+        EXPECT_TRUE(worst(TK::cpu::binary(op, a, b), floats(*set, name)) < tolerance) << "cpu binary matches " << name;
+    }
+    EXPECT_TRUE(worst(TK::cpu::binary(TK::BinaryOp::Add, a, floats(*set, "binary.channel"), 30), floats(*set, "binary.add_channel")) < tolerance)
+        << "cpu binary adds one value per channel";
+
+    const TK::ConvTranspose1d pool { .c_in = 6, .c_out = 6, .kernel = 3, .stride = 2, .pad = 1, .output_pad = 1, .groups = 6 };
+    EXPECT_TRUE(TK::conv_transpose1d_length(pool, 7) == 14) << "Kokoro's pool doubles the length";
+    EXPECT_TRUE(worst(TK::cpu::conv_transpose1d(pool, floats(*set, "conv_transpose_depthwise.x"), floats(*set, "conv_transpose_depthwise.w"),
+                    floats(*set, "conv_transpose_depthwise.b"), 1, 7),
+              floats(*set, "conv_transpose_depthwise.y"))
+        < 1.0e-5) << "cpu depthwise transposed convolution matches Kokoro's pool";
+    const TK::ConvTranspose1d grouped { .c_in = 4, .c_out = 6, .kernel = 4, .stride = 2, .pad = 1, .groups = 2 };
+    EXPECT_TRUE(worst(TK::cpu::conv_transpose1d(grouped, floats(*set, "conv_transpose_grouped.x"), floats(*set, "conv_transpose_grouped.w"), {}, 2, 5),
+              floats(*set, "conv_transpose_grouped.y"))
+        < 1.0e-5) << "cpu transposed convolution with two groups matches PyTorch";
+
+    const auto columns = floats(*set, "gather.columns");
+    EXPECT_TRUE(TK::cpu::gather(floats(*set, "gather.table"), indices(floats(*set, "gather.ids")), 4, 1, 4) == floats(*set, "gather.embedding"))
+        << "cpu gather from a table is F.embedding, written channel-major";
+    std::vector<int32_t> repeat;
+    const auto durations = indices(floats(*set, "gather.durations"));
+    for (size_t t = 0; t < durations.size(); ++t) {
+        repeat.insert(repeat.end(), static_cast<size_t>(durations[t]), static_cast<int32_t>(t));
+    }
+    EXPECT_TRUE(TK::cpu::gather(columns, repeat, 3, 5, 1) == floats(*set, "gather.repeat")) << "cpu gather by durations is repeat_interleave";
+    std::vector<int32_t> nearest(10);
+    std::ranges::generate(nearest, [i = 0]() mutable { return i++ / 2; });
+    EXPECT_TRUE(TK::cpu::gather(columns, nearest, 3, 5, 1) == floats(*set, "gather.nearest")) << "cpu gather is nearest upsampling by 2";
+    EXPECT_TRUE(TK::cpu::gather(columns, std::vector<int32_t> { 1, 0, 1, 2, 3, 4 }, 3, 5, 1) == floats(*set, "gather.reflect")) << "cpu gather is reflection padding (1, 0)";
+    const auto padded = TK::cpu::gather(columns, std::vector<int32_t> { -1, 0 }, 3, 5, 1);
+    EXPECT_TRUE(padded[0] == 0.0F && padded[1] == columns[0]) << "a negative index writes zero";
+
+    constexpr uint32_t hidden = 6;
+    constexpr uint32_t steps = 9;
+    constexpr uint32_t width = 12;
+    const auto sequence = floats(*set, "lstm.x");
+    std::vector<float> hs(2 * hidden * steps, 0.0F);
+    for (const std::string suffix : { "", "_reverse" }) {
+        const auto w_ih = floats(*set, "lstm.weight_ih_l0" + suffix);
+        const auto b_ih = floats(*set, "lstm.bias_ih_l0" + suffix);
+        const auto b_hh = floats(*set, "lstm.bias_hh_l0" + suffix);
+        std::vector<float> gates(4 * hidden * steps);
+        for (uint32_t row = 0; row < 4 * hidden; ++row) {
+            for (uint32_t t = 0; t < steps; ++t) {
+                float acc = b_ih[row] + b_hh[row];
+                for (uint32_t i = 0; i < width; ++i) {
+                    acc += w_ih[row * width + i] * sequence[i * steps + t];
+                }
+                gates[row * steps + t] = acc;
+            }
+        }
+        std::vector<float> state(2 * hidden, 0.0F);
+        const bool reverse = !suffix.empty();
+        TK::cpu::lstm_recurrence(gates, floats(*set, "lstm.weight_hh_l0" + suffix), state, hs, steps, hidden, reverse, reverse ? hidden : 0);
+    }
+    EXPECT_TRUE(worst(hs, floats(*set, "lstm.y")) < 1.0e-5) << "cpu recurrence over precomputed gates, both directions, matches a bidirectional nn.LSTM";
+
+    EXPECT_TRUE(worst(TK::fold_weight_norm(floats(*set, "weight_norm.g"), floats(*set, "weight_norm.v")), floats(*set, "weight_norm.w")) < tolerance)
+        << "fold_weight_norm matches torch._weight_norm along dimension 0";
 }
 
 /** Registers the safetensors and torch formats, once per test process. */

@@ -1,0 +1,101 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+
+layout(local_size_x = 512, local_size_y = 1, local_size_z = 1) in;
+
+layout(buffer_reference, std430) readonly buffer FloatRef {
+    float v[];
+};
+
+layout(buffer_reference, std430) buffer StateRef {
+    float v[];
+};
+
+layout(buffer_reference, std430) buffer ResultRef {
+    float v[];
+};
+
+layout(push_constant) uniform PC {
+    FloatRef gates_in;
+    FloatRef w_hh;
+    StateRef state;
+    ResultRef hs;
+    uint steps;
+    uint hidden;
+    uint reverse;
+    uint row_offset;
+} pc;
+
+const uint WORKGROUP = 512u;
+const uint MAX_HIDDEN = 256u;
+
+shared float h_shared[MAX_HIDDEN];
+shared float h_next[MAX_HIDDEN];
+shared float gates[4u * MAX_HIDDEN];
+
+float sigmoid(float v)
+{
+    return 1.0 / (1.0 + exp(-v));
+}
+
+/**
+ * @brief The recurrence of an LSTM over a whole sequence in one workgroup, from precomputed input gates.
+ *
+ * gates_in is [4 * hidden, steps], one row per gate unit: the input
+ * projection W_ih x plus both biases, as a pointwise convolution writes it,
+ * so the input may have any width. Gate rows are input, forget, cell and
+ * output, as PyTorch orders them, and w_hh is [4 * hidden, hidden]. With
+ * reverse set the steps run from last to first, as the second direction of a
+ * bidirectional LSTM does. The hidden vector of each step is written to rows
+ * row_offset to row_offset + hidden - 1 of hs, each row steps long, so both
+ * directions fill one [2 * hidden, steps] output. state holds h then c, read
+ * at the start and written at the end. hidden is 1 to 256.
+ */
+void main()
+{
+    const uint r = gl_LocalInvocationID.x;
+    const uint H = pc.hidden;
+    const uint T = pc.steps;
+    const uint rows = 4u * H;
+
+    float c_reg = 0.0;
+    if (r < H) {
+        h_shared[r] = pc.state.v[r];
+        c_reg = pc.state.v[H + r];
+    }
+    barrier();
+
+    for (uint step = 0u; step < T; ++step) {
+        const uint t = pc.reverse != 0u ? T - 1u - step : step;
+        for (uint row = r; row < rows; row += WORKGROUP) {
+            float acc = pc.gates_in.v[row * T + t];
+            const uint base = row * H;
+            for (uint j = 0u; j < H; ++j) {
+                acc += pc.w_hh.v[base + j] * h_shared[j];
+            }
+            gates[row] = acc;
+        }
+        barrier();
+
+        if (r < H) {
+            const float i_gate = sigmoid(gates[r]);
+            const float f_gate = sigmoid(gates[H + r]);
+            const float g_gate = tanh(clamp(gates[2u * H + r], -15.0, 15.0));
+            const float o_gate = sigmoid(gates[3u * H + r]);
+            c_reg = f_gate * c_reg + i_gate * g_gate;
+            const float h_value = o_gate * tanh(clamp(c_reg, -15.0, 15.0));
+            h_next[r] = h_value;
+            pc.hs.v[(pc.row_offset + r) * T + t] = h_value;
+        }
+        barrier();
+
+        if (r < H)
+            h_shared[r] = h_next[r];
+        barrier();
+    }
+
+    if (r < H) {
+        pc.state.v[r] = h_shared[r];
+        pc.state.v[H + r] = c_reg;
+    }
+}

@@ -172,6 +172,14 @@ struct Bench {
         return context->shared_buffer_address(0, binding);
     }
 
+    uint64_t put_indices(uint32_t binding, const std::vector<int32_t>& values)
+    {
+        context->ensure_shared_buffer(0, binding, std::max<size_t>(values.size(), 1),
+            Yantra::GpuBufferBinding::ElementType::INT32, Portal::Graphics::BufferUsageHint::COMPUTE);
+        context->upload_shared_raw(0, binding, reinterpret_cast<const uint8_t*>(values.data()), values.size() * sizeof(int32_t));
+        return context->shared_buffer_address(0, binding);
+    }
+
     uint64_t space(uint32_t binding, size_t count)
     {
         context->ensure_shared_buffer(0, binding, count, Yantra::GpuBufferBinding::ElementType::FLOAT32);
@@ -198,7 +206,7 @@ TEST_F(Gpu, UnaryMatchesTheCpu)
         float high;
         std::string_view name;
     };
-    const std::array<Case, 12> cases { {
+    const std::array<Case, 15> cases { {
         { TK::UnaryOp::Sin, 0.0F, 0.0F, -1000.0F, 1000.0F, "Sin far from zero" },
         { TK::UnaryOp::Cos, 0.0F, 0.0F, -1000.0F, 1000.0F, "Cos far from zero" },
         { TK::UnaryOp::Affine, 1.5F, -0.25F, -4.0F, 4.0F, "Affine" },
@@ -211,6 +219,9 @@ TEST_F(Gpu, UnaryMatchesTheCpu)
         { TK::UnaryOp::Silu, 0.0F, 0.0F, -8.0F, 8.0F, "Silu" },
         { TK::UnaryOp::Snake, 0.7F, 0.0F, -4.0F, 4.0F, "Snake with one a" },
         { TK::UnaryOp::Clamp, -1.0F, 0.5F, -4.0F, 4.0F, "Clamp" },
+        { TK::UnaryOp::GeluTanh, 0.0F, 0.0F, -8.0F, 8.0F, "GeluTanh" },
+        { TK::UnaryOp::Fract, 0.0F, 0.0F, -50.0F, 50.0F, "Fract" },
+        { TK::UnaryOp::Step, 10.0F, 0.0F, 0.0F, 20.0F, "Step" },
     } };
     for (const auto& c : cases) {
         Bench bench;
@@ -245,15 +256,46 @@ TEST_F(Gpu, LargeDispatchReachesEveryElement)
     EXPECT_TRUE(y[0] == 1.0F && y[count / 2] == 2.0F * static_cast<float>(count / 2) + 1.0F && y[count - 1] == 2.0F * static_cast<float>(count - 1) + 1.0F) << "a dispatch past one axis of workgroups reaches every element";
 }
 
-TEST_F(Gpu, MultiplyMatchesTheCpu)
+TEST_F(Gpu, BinaryMatchesTheCpu)
 {
-    Bench bench;
     const auto a = random_values(4 * 30, -2.0F, 2.0F, 21);
-    const auto b = random_values(4, -2.0F, 2.0F, 22);
-    const uint64_t pa = bench.put(0, a);
-    const uint64_t pb = bench.put(1, b);
-    bench.run({ TK::multiply_stage(pa, pb, bench.space(2, a.size()), static_cast<uint32_t>(a.size()), 30, 4) });
-    EXPECT_TRUE(bench.get(2, a.size()) == TK::cpu::multiply(a, b, 30)) << "nn_multiply scales each channel of [4, 30] exactly as the CPU";
+    const auto channel = random_values(4, -2.0F, 2.0F, 22);
+    auto b = random_values(4 * 30, -2.0F, 2.0F, 23);
+    for (auto& value : b) {
+        value += std::copysign(0.25F, value);
+    }
+    const auto count = static_cast<uint32_t>(a.size());
+    {
+        Bench bench;
+        const uint64_t pa = bench.put(0, a);
+        const uint64_t pb = bench.put(1, channel);
+        bench.run({ TK::multiply_stage(pa, pb, bench.space(2, a.size()), count, 30, 4) });
+        EXPECT_TRUE(bench.get(2, a.size()) == TK::cpu::multiply(a, channel, 30)) << "nn_binary scales each channel of [4, 30] exactly as the CPU";
+    }
+    const std::pair<TK::BinaryOp, std::string_view> ops[] = {
+        { TK::BinaryOp::Add, "Add" },
+        { TK::BinaryOp::Subtract, "Subtract" },
+        { TK::BinaryOp::Divide, "Divide" },
+        { TK::BinaryOp::Maximum, "Maximum" },
+        { TK::BinaryOp::Minimum, "Minimum" },
+        { TK::BinaryOp::Atan2, "Atan2" },
+    };
+    for (const auto& [op, name] : ops) {
+        Bench bench;
+        const uint64_t pa = bench.put(0, a);
+        const uint64_t pb = bench.put(1, b);
+        bench.run({ TK::binary_stage(op, pa, pb, bench.space(2, a.size()), count) });
+        const double error = worst(bench.get(2, a.size()), TK::cpu::binary(op, a, b));
+        EXPECT_TRUE(error < 1.0e-6) << std::format("nn_binary {} matches the CPU element-wise (worst {:.2e})", name, error);
+    }
+    std::vector<float> quadrants { 1.0F, 1.0F, -1.0F, -1.0F, 0.0F, 0.0F, 3.0F, -3.0F, 1.0e-3F };
+    std::vector<float> real { 1.0F, -1.0F, 1.0F, -1.0F, 2.0F, -2.0F, 0.0F, 0.0F, -1.0e3F };
+    Bench bench;
+    const uint64_t pq = bench.put(0, quadrants);
+    const uint64_t pr = bench.put(1, real);
+    bench.run({ TK::binary_stage(TK::BinaryOp::Atan2, pq, pr, bench.space(2, real.size()), static_cast<uint32_t>(real.size())) });
+    const double error = worst(bench.get(2, real.size()), TK::cpu::binary(TK::BinaryOp::Atan2, quadrants, real));
+    EXPECT_TRUE(error < 1.0e-6) << std::format("nn_binary Atan2 takes each quadrant and both axes as std::atan2 (worst {:.2e})", error);
 }
 
 TEST_F(Gpu, ConvTransposeMatchesTheCpu)
@@ -274,6 +316,101 @@ TEST_F(Gpu, ConvTransposeMatchesTheCpu)
     bench.run({ TK::conv_transpose1d_stage(layer, px, pw, pb, bench.space(3, out_count), batch, t_in) });
     const double error = worst(bench.get(3, out_count), TK::cpu::conv_transpose1d(layer, x, w, b, batch, t_in));
     EXPECT_TRUE(error < 1.0e-5) << std::format("nn_conv_transpose1d with bias, ReLU input and GELU matches the CPU (worst {:.2e})", error);
+
+    for (const auto& grouped : {
+             TK::ConvTranspose1d { .c_in = 64, .c_out = 64, .kernel = 3, .stride = 2, .pad = 1, .output_pad = 1, .groups = 64 },
+             TK::ConvTranspose1d { .c_in = 6, .c_out = 9, .kernel = 4, .stride = 2, .pad = 1, .groups = 3, .activation = TK::Activation::Relu },
+         }) {
+        Bench grouped_bench;
+        const auto gx = random_values(static_cast<size_t>(grouped.c_in) * t_in, -2.0F, 2.0F, 34);
+        const auto gw = random_values(static_cast<size_t>(grouped.c_in) * (grouped.c_out / grouped.groups) * grouped.kernel, -0.5F, 0.5F, 35);
+        const auto gb = random_values(grouped.c_out, -0.5F, 0.5F, 36);
+        const size_t g_count = static_cast<size_t>(grouped.c_out) * TK::conv_transpose1d_length(grouped, t_in);
+        const uint64_t gpx = grouped_bench.put(0, gx);
+        const uint64_t gpw = grouped_bench.put(1, gw);
+        const uint64_t gpb = grouped_bench.put(2, gb);
+        grouped_bench.run({ TK::conv_transpose1d_stage(grouped, gpx, gpw, gpb, grouped_bench.space(3, g_count), 1, t_in) });
+        const double g_error = worst(grouped_bench.get(3, g_count), TK::cpu::conv_transpose1d(grouped, gx, gw, gb, 1, t_in));
+        EXPECT_TRUE(g_error < 1.0e-5) << std::format("nn_conv_transpose1d with {} groups matches the CPU (worst {:.2e})", grouped.groups, g_error);
+    }
+    EXPECT_THROW((void)TK::conv_transpose1d_stage(TK::ConvTranspose1d { .c_in = 6, .c_out = 4, .kernel = 3, .groups = 4 }, 0, 0, 0, 0, 1, 8),
+        std::invalid_argument)
+        << "groups that do not divide the channels are refused";
+}
+
+TEST_F(Gpu, GatherMatchesTheCpu)
+{
+    constexpr uint32_t channels = 5;
+    constexpr uint32_t length = 40;
+    const auto columns = random_values(static_cast<size_t>(channels) * length, -2.0F, 2.0F, 51);
+    std::vector<int32_t> index(130);
+    std::mt19937 engine(52);
+    std::uniform_int_distribution<int32_t> pick(-1, static_cast<int32_t>(length) - 1);
+    std::ranges::generate(index, [&] { return pick(engine); });
+
+    Bench bench;
+    const uint64_t src = bench.put(0, columns);
+    const uint64_t ids = bench.put_indices(1, index);
+    const auto count = static_cast<uint32_t>(index.size());
+    bench.run({ TK::gather_stage(src, ids, bench.space(2, static_cast<size_t>(channels) * count), channels, count, length, 1),
+        TK::gather_stage(src, ids, bench.space(3, static_cast<size_t>(channels) * count), channels, count, 1, channels) });
+    EXPECT_TRUE(bench.get(2, static_cast<size_t>(channels) * count) == TK::cpu::gather(columns, index, channels, length, 1))
+        << "nn_gather picks columns of a channel-major tensor, and zero for -1, exactly as the CPU";
+    EXPECT_TRUE(bench.get(3, static_cast<size_t>(channels) * count) == TK::cpu::gather(columns, index, channels, 1, channels))
+        << "nn_gather picks rows of the same values read as a [40, 5] table into channel-major columns exactly as the CPU";
+}
+
+TEST_F(Gpu, LstmRecurrenceMatchesTheCpu)
+{
+    // The input projection is MayaFlux's own nn_conv1d with kernel 1; nn_lstm_recurrence adds the recurrence.
+    for (const uint32_t hidden : { 7U, 256U }) {
+        constexpr uint32_t width = 40;
+        constexpr uint32_t steps = 23;
+        const uint32_t rows = 4 * hidden;
+        const auto x = random_values(static_cast<size_t>(width) * steps, -1.0F, 1.0F, 61);
+        const auto w_ih = random_values(static_cast<size_t>(rows) * width, -0.2F, 0.2F, 62);
+        const auto bias = random_values(rows, -0.2F, 0.2F, 63);
+        const float scale = 1.0F / std::sqrt(static_cast<float>(hidden));
+        const auto w_hh = random_values(static_cast<size_t>(rows) * hidden, -scale, scale, 64);
+        const auto w_hh_reverse = random_values(static_cast<size_t>(rows) * hidden, -scale, scale, 65);
+        const auto start = random_values(2 * hidden, -0.5F, 0.5F, 66);
+
+        Bench bench;
+        const uint64_t px = bench.put(0, x);
+        const uint64_t pw = bench.put(1, w_ih);
+        const uint64_t pb = bench.put(2, bias);
+        const uint64_t gates = bench.space(3, static_cast<size_t>(rows) * steps);
+        const uint64_t forward = bench.put(4, w_hh);
+        const uint64_t backward = bench.put(5, w_hh_reverse);
+        const uint64_t state = bench.put(6, start);
+        const uint64_t state_reverse = bench.put(7, start);
+        const uint64_t hs = bench.space(8, static_cast<size_t>(2) * hidden * steps);
+        bench.run({ TK::conv1d_stage(TK::Conv1d { .c_in = width, .c_out = rows, .kernel = 1 }, px, pw, pb, gates, 1, steps),
+            TK::lstm_recurrence_stage(gates, forward, state, hs, steps, hidden),
+            TK::lstm_recurrence_stage(gates, backward, state_reverse, hs, steps, hidden, true, hidden) });
+
+        std::vector<float> want_gates(static_cast<size_t>(rows) * steps);
+        for (uint32_t row = 0; row < rows; ++row) {
+            for (uint32_t t = 0; t < steps; ++t) {
+                float acc = bias[row];
+                for (uint32_t i = 0; i < width; ++i) {
+                    acc += w_ih[static_cast<size_t>(row) * width + i] * x[static_cast<size_t>(i) * steps + t];
+                }
+                want_gates[static_cast<size_t>(row) * steps + t] = acc;
+            }
+        }
+        std::vector<float> want_hs(static_cast<size_t>(2) * hidden * steps);
+        std::vector<float> want_state(start);
+        std::vector<float> want_state_reverse(start);
+        TK::cpu::lstm_recurrence(want_gates, w_hh, want_state, want_hs, steps, hidden);
+        TK::cpu::lstm_recurrence(want_gates, w_hh_reverse, want_state_reverse, want_hs, steps, hidden, true, hidden);
+
+        const double error = worst(bench.get(8, want_hs.size()), want_hs);
+        const double state_error = std::max(worst(bench.get(6, 2 * hidden), want_state), worst(bench.get(7, 2 * hidden), want_state_reverse));
+        EXPECT_TRUE(error < 1.0e-5) << std::format("nn_conv1d then nn_lstm_recurrence both ways, hidden {}, matches the CPU (worst {:.2e})", hidden, error);
+        EXPECT_TRUE(state_error < 1.0e-5) << std::format("the final h and c of both directions, hidden {}, match the CPU (worst {:.2e})", hidden, state_error);
+    }
+    EXPECT_THROW((void)TK::lstm_recurrence_stage(0, 0, 0, 0, 4, 257), std::invalid_argument) << "a hidden width above 256 is refused";
 }
 
 TEST_F(Gpu, OverlapAddMatchesTheCpu)

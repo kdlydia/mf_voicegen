@@ -1,0 +1,52 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(buffer_reference, std430) readonly buffer FloatRef {
+    float v[];
+};
+
+layout(buffer_reference, std430) readonly buffer IndexRef {
+    int v[];
+};
+
+layout(buffer_reference, std430) buffer ResultRef {
+    float v[];
+};
+
+layout(push_constant) uniform PC {
+    FloatRef src;
+    IndexRef index;
+    ResultRef dst;
+    uint channels;
+    uint count;
+    uint channel_stride;
+    uint element_stride;
+} pc;
+
+uint invocation_index()
+{
+    return gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+}
+
+/**
+ * @brief dst[c, t] = src[c * channel_stride + index[t] * element_stride], over [channels, count].
+ *
+ * One index per output column, shared by every channel. A negative index
+ * writes zero. With a table [rows, channels] (channel_stride 1, element_stride
+ * channels) it is an embedding lookup into channel-major columns; with a
+ * channel-major source [channels, length] (channel_stride length,
+ * element_stride 1) it repeats, reorders, upsamples or pads columns, by
+ * whatever indices it is given.
+ */
+void main()
+{
+    const uint idx = invocation_index();
+    if (idx >= pc.channels * pc.count)
+        return;
+    const uint t = idx % pc.count;
+    const uint c = idx / pc.count;
+    const int at = pc.index.v[t];
+    pc.dst.v[idx] = at < 0 ? 0.0 : pc.src.v[c * pc.channel_stride + uint(at) * pc.element_stride];
+}

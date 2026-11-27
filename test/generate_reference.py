@@ -94,8 +94,81 @@ def kernel_fixtures():
     out['istft.imag'] = spec.imag.contiguous()
     out['istft.y'] = torch.istft(spec.unsqueeze(0), n_fft, hop, n_fft, window, center=True).squeeze(0)
 
+    kokoro_fixtures(out, x)
+
     save_file({key: value.contiguous() for key, value in out.items()}, FIXTURES / 'kernels.safetensors')
     (FIXTURES / 'kernels.safetensors').chmod(0o644)
+
+
+def kokoro_fixtures(out, x):
+    """The operations Kokoro adds to Vocos's: see docs/kokoro-operations.md."""
+    generator = torch.Generator().manual_seed(82)
+
+    out['unary.gelu_tanh'] = F.gelu(x, approximate='tanh')
+    out['unary.fract_x'] = x * 1.3
+    out['unary.fract'] = torch.remainder(out['unary.fract_x'], 1.0)
+    out['unary.step'] = (x > 0.5).float()
+
+    a = torch.randn(4, 30, generator=generator)
+    b = torch.randn(4, 30, generator=generator)
+    b = b + 0.5 * torch.sign(b)
+    channel = torch.randn(4, generator=generator)
+    out['binary.a'] = a
+    out['binary.b'] = b
+    out['binary.channel'] = channel
+    out['binary.multiply'] = a * b
+    out['binary.add'] = a + b
+    out['binary.subtract'] = a - b
+    out['binary.divide'] = a / b
+    out['binary.maximum'] = torch.maximum(a, b)
+    out['binary.minimum'] = torch.minimum(a, b)
+    out['binary.angle'] = torch.angle(torch.complex(b, a))
+    out['binary.add_channel'] = a + channel.view(4, 1)
+
+    # Kokoro's AdainResBlk1d pool: a depthwise ConvTranspose1d, k3 s2 p1 op1.
+    dw_x = torch.randn(1, 6, 7, generator=generator)
+    dw_w = torch.randn(6, 1, 3, generator=generator)
+    dw_b = torch.randn(6, generator=generator)
+    out['conv_transpose_depthwise.x'] = dw_x
+    out['conv_transpose_depthwise.w'] = dw_w
+    out['conv_transpose_depthwise.b'] = dw_b
+    out['conv_transpose_depthwise.y'] = F.conv_transpose1d(dw_x, dw_w, dw_b, stride=2, padding=1, output_padding=1, groups=6)
+    g_x = torch.randn(2, 4, 5, generator=generator)
+    g_w = torch.randn(4, 3, 4, generator=generator)
+    out['conv_transpose_grouped.x'] = g_x
+    out['conv_transpose_grouped.w'] = g_w
+    out['conv_transpose_grouped.y'] = F.conv_transpose1d(g_x, g_w, None, stride=2, padding=1, groups=2)
+
+    # Indices are stored as floats; the tests turn them into int32.
+    table = torch.randn(10, 4, generator=generator)
+    ids = torch.tensor([3, 0, 9, 9, 1, 5])
+    columns = torch.randn(3, 5, generator=generator)
+    durations = torch.tensor([2, 0, 3, 1, 2])
+    out['gather.table'] = table
+    out['gather.ids'] = ids.float()
+    out['gather.embedding'] = F.embedding(ids, table).t()
+    out['gather.columns'] = columns
+    out['gather.durations'] = durations.float()
+    out['gather.repeat'] = torch.repeat_interleave(columns, durations, dim=1)
+    out['gather.nearest'] = F.interpolate(columns[None], scale_factor=2, mode='nearest')[0]
+    out['gather.reflect'] = F.pad(columns[None], (1, 0), mode='reflect')[0]
+
+    lstm = torch.nn.LSTM(12, 6, batch_first=True, bidirectional=True)
+    with torch.no_grad():
+        for parameter in lstm.parameters():
+            parameter.copy_(torch.randn(parameter.shape, generator=generator) * 0.4)
+        sequence = torch.randn(1, 9, 12, generator=generator)
+        hs, _ = lstm(sequence)
+    out['lstm.x'] = sequence[0].t()
+    for name, parameter in lstm.named_parameters():
+        out['lstm.' + name] = parameter.detach()
+    out['lstm.y'] = hs[0].t()
+
+    g = torch.rand(5, 1, 1, generator=generator) + 0.5
+    v = torch.randn(5, 3, 4, generator=generator)
+    out['weight_norm.g'] = g
+    out['weight_norm.v'] = v
+    out['weight_norm.w'] = torch._weight_norm(v, g, 0)
 
 
 def speech_fixture(path):

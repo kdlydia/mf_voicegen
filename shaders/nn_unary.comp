@@ -33,6 +33,9 @@ const uint OP_LEAKY_RELU = 6u;
 const uint OP_SILU = 7u;
 const uint OP_SNAKE = 8u;
 const uint OP_CLAMP = 9u;
+const uint OP_GELU_TANH = 10u;
+const uint OP_FRACT = 11u;
+const uint OP_STEP = 12u;
 
 uint invocation_index()
 {
@@ -70,7 +73,9 @@ vec2 sin_cos(float x)
  * SIN, COS, TANH. LEAKY_RELU x, or alpha * x below zero. SILU x * sigmoid(x).
  * SNAKE x + sin(a * x)^2 / a, with a taken from params at the element's
  * channel, (i / inner) % channels, or alpha when channels is 0. CLAMP
- * min(max(x, alpha), beta).
+ * min(max(x, alpha), beta). GELU_TANH the tanh approximation of GELU, as
+ * gelu_new and approximate='tanh'. FRACT x - floor(x), as torch.remainder(x, 1).
+ * STEP 1 above alpha, else 0.
  */
 void main()
 {
@@ -102,6 +107,13 @@ void main()
         y = x + s * s / a;
     } else if (pc.op == OP_CLAMP) {
         y = min(max(x, pc.alpha), pc.beta);
+    } else if (pc.op == OP_GELU_TANH) {
+        const float inner = 0.7978845608028654 * (x + 0.044715 * x * x * x);
+        y = 0.5 * x * (1.0 + tanh(clamp(inner, -15.0, 15.0)));
+    } else if (pc.op == OP_FRACT) {
+        y = x - floor(x);
+    } else if (pc.op == OP_STEP) {
+        y = x > pc.alpha ? 1.0 : 0.0;
     }
     pc.dst.v[idx] = y;
 }

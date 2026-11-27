@@ -1,0 +1,100 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(buffer_reference, std430) readonly buffer FloatRef {
+    float v[];
+};
+
+layout(buffer_reference, std430) buffer ResultRef {
+    float v[];
+};
+
+layout(push_constant) uniform PC {
+    FloatRef a;
+    FloatRef b;
+    ResultRef dst;
+    uint count;
+    uint inner;
+    uint b_count;
+    uint op;
+} pc;
+
+const uint OP_MULTIPLY = 0u;
+const uint OP_ADD = 1u;
+const uint OP_SUBTRACT = 2u;
+const uint OP_DIVIDE = 3u;
+const uint OP_MAXIMUM = 4u;
+const uint OP_MINIMUM = 5u;
+const uint OP_ATAN2 = 6u;
+
+const float PI = 3.14159265358979;
+const float HALF_PI = 1.57079632679490;
+
+uint invocation_index()
+{
+    return gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+}
+
+/**
+ * @brief atan of x >= 0 to about one ulp, as Cephes atanf.
+ */
+float atan_positive(float x)
+{
+    float base = 0.0;
+    float v = x;
+    if (v > 2.414213562373095) {
+        base = HALF_PI;
+        v = -1.0 / v;
+    } else if (v > 0.4142135623730950) {
+        base = 0.785398163397448;
+        v = (v - 1.0) / (v + 1.0);
+    }
+    const float z = v * v;
+    return base + ((((8.05374449538e-2 * z - 1.38776856032e-1) * z + 1.99777106478e-1) * z - 3.33329491539e-1) * z * v + v);
+}
+
+/**
+ * @brief atan2(y, x) to about one ulp. Built-in atan is only bounded loosely.
+ */
+float atan2_precise(float y, float x)
+{
+    if (x == 0.0)
+        return y > 0.0 ? HALF_PI : (y < 0.0 ? -HALF_PI : 0.0);
+    float angle = atan_positive(abs(y / x));
+    if (x < 0.0)
+        angle = PI - angle;
+    return y < 0.0 ? -angle : angle;
+}
+
+/**
+ * @brief Element-wise a[i] op b[(i / inner) % b_count], over count floats. dst may be a.
+ *
+ * inner 1 and b_count count pair element with element. inner t and b_count c
+ * apply one b per channel of a [c, t] tensor. MULTIPLY, ADD, SUBTRACT,
+ * DIVIDE, MAXIMUM, MINIMUM, and ATAN2, which is atan2(a, b): a the imaginary
+ * and b the real part, as torch.angle reads a complex value.
+ */
+void main()
+{
+    const uint idx = invocation_index();
+    if (idx >= pc.count)
+        return;
+    const float a = pc.a.v[idx];
+    const float b = pc.b.v[(idx / max(pc.inner, 1u)) % max(pc.b_count, 1u)];
+    float y = a * b;
+    if (pc.op == OP_ADD)
+        y = a + b;
+    else if (pc.op == OP_SUBTRACT)
+        y = a - b;
+    else if (pc.op == OP_DIVIDE)
+        y = a / b;
+    else if (pc.op == OP_MAXIMUM)
+        y = max(a, b);
+    else if (pc.op == OP_MINIMUM)
+        y = min(a, b);
+    else if (pc.op == OP_ATAN2)
+        y = atan2_precise(a, b);
+    pc.dst.v[idx] = y;
+}
